@@ -24,8 +24,11 @@ import org.apache.flink.connector.base.source.reader.RecordEmitter;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 
@@ -36,9 +39,17 @@ public class KafkaRecordEmitter<T>
 
     private final KafkaRecordDeserializationSchema<T> deserializationSchema;
     private final SourceOutputWrapper<T> sourceOutputWrapper = new SourceOutputWrapper<>();
+    @Nullable private final OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag;
 
     public KafkaRecordEmitter(KafkaRecordDeserializationSchema<T> deserializationSchema) {
+        this(deserializationSchema, null);
+    }
+
+    public KafkaRecordEmitter(
+            KafkaRecordDeserializationSchema<T> deserializationSchema,
+            @Nullable OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag) {
         this.deserializationSchema = deserializationSchema;
+        this.deserializationErrorTag = deserializationErrorTag;
     }
 
     @Override
@@ -53,7 +64,13 @@ public class KafkaRecordEmitter<T>
             deserializationSchema.deserialize(consumerRecord, sourceOutputWrapper);
             splitState.setCurrentOffset(consumerRecord.offset() + 1);
         } catch (Exception e) {
-            throw new IOException("Failed to deserialize consumer record due to", e);
+            if (deserializationErrorTag == null) {
+                throw new IOException("Failed to deserialize consumer record due to", e);
+            }
+            // Route the raw record that could not be deserialized to the DLQ side output and
+            // advance past it, so a single poison record does not fail the source.
+            output.collect(deserializationErrorTag, consumerRecord, consumerRecord.timestamp());
+            splitState.setCurrentOffset(consumerRecord.offset() + 1);
         }
     }
 

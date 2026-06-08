@@ -40,9 +40,12 @@ import org.apache.flink.streaming.api.connector.sink2.SupportsPostCommitTopology
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.lineage.LineageVertex;
 import org.apache.flink.streaming.api.lineage.LineageVertexProvider;
+import org.apache.flink.util.OutputTag;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -85,6 +88,7 @@ public class KafkaSink<IN>
     private final Properties kafkaProducerConfig;
     private final String transactionalIdPrefix;
     private final TransactionNamingStrategy transactionNamingStrategy;
+    @Nullable private OutputTag<IN> serializationErrorTag;
 
     KafkaSink(
             DeliveryGuarantee deliveryGuarantee,
@@ -97,6 +101,15 @@ public class KafkaSink<IN>
         this.transactionalIdPrefix = transactionalIdPrefix;
         this.recordSerializer = recordSerializer;
         this.transactionNamingStrategy = transactionNamingStrategy;
+    }
+
+    void setSerializationErrorTag(@Nullable OutputTag<IN> serializationErrorTag) {
+        this.serializationErrorTag = serializationErrorTag;
+    }
+
+    @Nullable
+    OutputTag<IN> getSerializationErrorTag() {
+        return serializationErrorTag;
     }
 
     /**
@@ -162,6 +175,7 @@ public class KafkaSink<IN>
                             recordSerializer,
                             context.asSerializationSchemaInitializationContext());
         }
+        writer.setSerializationErrorTag(serializationErrorTag);
         writer.initialize();
         return writer;
     }

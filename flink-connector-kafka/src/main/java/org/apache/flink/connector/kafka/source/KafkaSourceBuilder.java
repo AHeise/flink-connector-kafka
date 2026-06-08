@@ -26,14 +26,18 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializerValidator;
 import org.apache.flink.connector.kafka.source.enumerator.subscriber.KafkaSubscriber;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.function.SerializableSupplier;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
@@ -107,6 +111,8 @@ public class KafkaSourceBuilder<OUT> {
     protected Properties props;
     // Client rackId supplier
     private SerializableSupplier<String> rackIdSupplier;
+    // Side output for records that fail deserialization
+    @Nullable private OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag;
 
     KafkaSourceBuilder() {
         this.subscriber = null;
@@ -428,6 +434,16 @@ public class KafkaSourceBuilder<OUT> {
      *
      * @return a KafkaSource with the settings made for this builder.
      */
+    /**
+     * Routes records that fail deserialization to the given side output (retrievable via {@code
+     * DataStreamSource#getSideOutput}) instead of failing the source.
+     */
+    public KafkaSourceBuilder<OUT> setDeserializationErrorTag(
+            OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag) {
+        this.deserializationErrorTag = deserializationErrorTag;
+        return this;
+    }
+
     public KafkaSource<OUT> build() {
         sanityCheck();
         parseAndSetRequiredProperties();
@@ -438,7 +454,8 @@ public class KafkaSourceBuilder<OUT> {
                 boundedness,
                 deserializationSchema,
                 props,
-                rackIdSupplier);
+                rackIdSupplier,
+                deserializationErrorTag);
     }
 
     // ------------- private helpers  --------------

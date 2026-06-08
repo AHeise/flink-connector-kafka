@@ -22,11 +22,14 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.java.ClosureCleaner;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.lineage.KafkaDatasetFacetProvider;
+import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -76,6 +79,7 @@ public class KafkaSinkBuilder<IN> {
     private final Properties kafkaProducerConfig;
     private KafkaRecordSerializationSchema<IN> recordSerializer;
     private TransactionNamingStrategy transactionNamingStrategy = TransactionNamingStrategy.DEFAULT;
+    @Nullable private OutputTag<IN> serializationErrorTag;
 
     KafkaSinkBuilder() {
         kafkaProducerConfig = new Properties();
@@ -215,13 +219,25 @@ public class KafkaSinkBuilder<IN> {
      *
      * @return {@link KafkaSink}
      */
+    /**
+     * Routes records that fail serialization into a {@link ProducerRecord} to the given side
+     * output (retrievable via {@code DataStreamSink#getSideOutput}) instead of failing the sink.
+     */
+    public KafkaSinkBuilder<IN> setSerializationErrorTag(OutputTag<IN> serializationErrorTag) {
+        this.serializationErrorTag = serializationErrorTag;
+        return this;
+    }
+
     public KafkaSink<IN> build() {
         sanityCheck();
-        return new KafkaSink<>(
-                deliveryGuarantee,
-                kafkaProducerConfig,
-                transactionalIdPrefix,
-                recordSerializer,
-                transactionNamingStrategy);
+        final KafkaSink<IN> sink =
+                new KafkaSink<>(
+                        deliveryGuarantee,
+                        kafkaProducerConfig,
+                        transactionalIdPrefix,
+                        recordSerializer,
+                        transactionNamingStrategy);
+        sink.setSerializationErrorTag(serializationErrorTag);
+        return sink;
     }
 }

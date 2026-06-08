@@ -31,6 +31,7 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.streaming.connectors.kafka.internals.metrics.KafkaMetricMutableWrapper;
 import org.apache.flink.util.FlinkRuntimeException;
+import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -81,6 +82,7 @@ class KafkaWriter<IN>
     private volatile Exception asyncProducerException;
     private final Map<String, KafkaMetricMutableWrapper> previouslyCreatedMetrics = new HashMap<>();
     private final SinkWriterMetricGroup metricGroup;
+    @Nullable private OutputTag<IN> serializationErrorTag;
     private final boolean disabledMetrics;
     // num records actually sent and acked by kafka; not volatile to prevent performance
     // degradation
@@ -166,11 +168,28 @@ class KafkaWriter<IN>
         }
     }
 
+    /** Routes elements that fail serialization into the given side output instead of failing. */
+    public void setSerializationErrorTag(@Nullable OutputTag<IN> serializationErrorTag) {
+        this.serializationErrorTag = serializationErrorTag;
+    }
+
     @Override
     public void write(@Nullable IN element, Context context) throws IOException {
         checkAsyncException();
-        final ProducerRecord<byte[], byte[]> record =
-                recordSerializer.serialize(element, kafkaSinkContext, context.timestamp());
+        final ProducerRecord<byte[], byte[]> record;
+        try {
+            record = recordSerializer.serialize(element, kafkaSinkContext, context.timestamp());
+        } catch (Exception e) {
+            if (serializationErrorTag == null) {
+                throw e instanceof IOException
+                        ? (IOException) e
+                        : new IOException("Failed to serialize record.", e);
+            }
+            // Route the element that could not be turned into a ProducerRecord to the DLQ side
+            // output; the error metric is incremented by the runtime for an ErrorOutputTag.
+            context.output(serializationErrorTag, element);
+            return;
+        }
         if (record != null) {
             currentProducer.send(record, deliveryCallback);
             numRecordsOutCounter.inc();
