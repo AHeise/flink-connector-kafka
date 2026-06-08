@@ -55,7 +55,8 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.streaming.api.lineage.LineageVertexProvider;
 import org.apache.flink.streaming.api.lineage.SourceLineageVertex;
-import org.apache.flink.util.OutputTag;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.util.ErrorOutputTag;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.apache.flink.util.function.SerializableSupplier;
 
@@ -115,9 +116,15 @@ public class KafkaSource<OUT>
     private final Properties props;
     // Client rackId callback
     private final SerializableSupplier<String> rackIdSupplier;
-    // Side output for records that fail deserialization (null if not configured)
-    @Nullable
-    private final OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag;
+
+    /**
+     * Blessed side output for records that fail deserialization; consume via {@code
+     * source.getSideOutput(KafkaSource.DESERIALIZATION_ERRORS)} or such a record fails the source.
+     */
+    public static final ErrorOutputTag<ConsumerRecord<byte[], byte[]>> DESERIALIZATION_ERRORS =
+            new ErrorOutputTag<>(
+                    "deserialization-errors",
+                    TypeInformation.of(new TypeHint<ConsumerRecord<byte[], byte[]>>() {}));
 
     KafkaSource(
             KafkaSubscriber subscriber,
@@ -126,8 +133,7 @@ public class KafkaSource<OUT>
             Boundedness boundedness,
             KafkaRecordDeserializationSchema<OUT> deserializationSchema,
             Properties props,
-            SerializableSupplier<String> rackIdSupplier,
-            @Nullable OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag) {
+            SerializableSupplier<String> rackIdSupplier) {
         this.subscriber = subscriber;
         this.startingOffsetsInitializer = startingOffsetsInitializer;
         this.stoppingOffsetsInitializer = stoppingOffsetsInitializer;
@@ -135,12 +141,6 @@ public class KafkaSource<OUT>
         this.deserializationSchema = deserializationSchema;
         this.props = props;
         this.rackIdSupplier = rackIdSupplier;
-        this.deserializationErrorTag = deserializationErrorTag;
-    }
-
-    @Nullable
-    OutputTag<ConsumerRecord<byte[], byte[]>> getDeserializationErrorTag() {
-        return deserializationErrorTag;
     }
 
     /**
@@ -194,8 +194,7 @@ public class KafkaSource<OUT>
                                 Optional.ofNullable(rackIdSupplier)
                                         .map(Supplier::get)
                                         .orElse(null));
-        KafkaRecordEmitter<OUT> recordEmitter =
-                new KafkaRecordEmitter<>(deserializationSchema, deserializationErrorTag);
+        KafkaRecordEmitter<OUT> recordEmitter = new KafkaRecordEmitter<>(deserializationSchema);
 
         return new KafkaSourceReader<>(
                 elementsQueue,

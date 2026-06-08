@@ -21,14 +21,13 @@ package org.apache.flink.connector.kafka.source.reader;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.connector.source.SourceOutput;
 import org.apache.flink.connector.base.source.reader.RecordEmitter;
+import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.OutputTag;
+import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-
-import javax.annotation.Nullable;
 
 import java.io.IOException;
 
@@ -39,17 +38,9 @@ public class KafkaRecordEmitter<T>
 
     private final KafkaRecordDeserializationSchema<T> deserializationSchema;
     private final SourceOutputWrapper<T> sourceOutputWrapper = new SourceOutputWrapper<>();
-    @Nullable private final OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag;
 
     public KafkaRecordEmitter(KafkaRecordDeserializationSchema<T> deserializationSchema) {
-        this(deserializationSchema, null);
-    }
-
-    public KafkaRecordEmitter(
-            KafkaRecordDeserializationSchema<T> deserializationSchema,
-            @Nullable OutputTag<ConsumerRecord<byte[], byte[]>> deserializationErrorTag) {
         this.deserializationSchema = deserializationSchema;
-        this.deserializationErrorTag = deserializationErrorTag;
     }
 
     @Override
@@ -64,13 +55,29 @@ public class KafkaRecordEmitter<T>
             deserializationSchema.deserialize(consumerRecord, sourceOutputWrapper);
             splitState.setCurrentOffset(consumerRecord.offset() + 1);
         } catch (Exception e) {
-            if (deserializationErrorTag == null) {
-                throw new IOException("Failed to deserialize consumer record due to", e);
-            }
-            // Route the raw record that could not be deserialized to the DLQ side output and
-            // advance past it, so a single poison record does not fail the source.
-            output.collect(deserializationErrorTag, consumerRecord, consumerRecord.timestamp());
+            forwardToErrorOutputOrThrow(
+                    consumerRecord,
+                    output,
+                    () -> {
+                        throw new IOException("Failed to deserialize consumer record due to", e);
+                    });
             splitState.setCurrentOffset(consumerRecord.offset() + 1);
+        }
+    }
+
+    /**
+     * Forwards a record that failed deserialization to {@link KafkaSource#DESERIALIZATION_ERRORS},
+     * or runs {@code fallback} (the connector's failure) when that side output is not connected.
+     */
+    private void forwardToErrorOutputOrThrow(
+            ConsumerRecord<byte[], byte[]> record,
+            SourceOutput<T> output,
+            ThrowingRunnable<IOException> fallback)
+            throws IOException {
+        try {
+            output.collect(KafkaSource.DESERIALIZATION_ERRORS, record, record.timestamp());
+        } catch (IllegalStateException | UnsupportedOperationException sideOutputUnavailable) {
+            fallback.run();
         }
     }
 
