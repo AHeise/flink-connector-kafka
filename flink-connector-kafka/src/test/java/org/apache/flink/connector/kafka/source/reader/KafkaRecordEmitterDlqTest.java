@@ -19,21 +19,21 @@
 package org.apache.flink.connector.kafka.source.reader;
 
 import org.apache.flink.api.common.eventtime.Watermark;
-import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.connector.source.SourceOutput;
+import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplit;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.ErrorOutputTag;
 import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,12 +41,11 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Tests that {@link KafkaRecordEmitter} routes undeserializable records to a DLQ side output. */
+/**
+ * Tests that {@link KafkaRecordEmitter} forwards undeserializable records to the blessed {@link
+ * KafkaSource#DESERIALIZATION_ERRORS} side output, or rethrows when it is not connected.
+ */
 class KafkaRecordEmitterDlqTest {
-
-    private static final OutputTag<ConsumerRecord<byte[], byte[]>> DLQ =
-            new ErrorOutputTag<>(
-                    "kafka-dlq", TypeInformation.of(new TypeHint<ConsumerRecord<byte[], byte[]>>() {}));
 
     /** Deserializes UTF-8 strings but fails on the value {@code "bad"}. */
     private static final KafkaRecordDeserializationSchema<String> SCHEMA =
@@ -68,8 +67,8 @@ class KafkaRecordEmitterDlqTest {
             };
 
     @Test
-    void brokenConsumerRecordIsRoutedToDlqAndOffsetAdvances() throws Exception {
-        final KafkaRecordEmitter<String> emitter = new KafkaRecordEmitter<>(SCHEMA, DLQ);
+    void brokenConsumerRecordIsForwardedToBlessedTagAndOffsetAdvances() throws Exception {
+        final KafkaRecordEmitter<String> emitter = new KafkaRecordEmitter<>(SCHEMA);
         final KafkaPartitionSplitState state =
                 new KafkaPartitionSplitState(
                         new KafkaPartitionSplit(new TopicPartition("topic", 0), 0L));
@@ -79,24 +78,42 @@ class KafkaRecordEmitterDlqTest {
         emitter.emitRecord(record(1L, "bad"), output, state);
 
         assertThat(output.mainValues).containsExactly("good");
-        assertThat(output.sideTag).isEqualTo(DLQ);
+        assertThat(output.sideTag).isEqualTo(KafkaSource.DESERIALIZATION_ERRORS);
         assertThat(output.sideValues)
                 .singleElement()
                 .extracting(r -> new String(r.value(), StandardCharsets.UTF_8))
                 .isEqualTo("bad");
-        // Offset advanced past both the good and the poison record.
         assertThat(state.getCurrentOffset()).isEqualTo(2L);
     }
 
     @Test
-    void brokenConsumerRecordFailsWhenNoDlqConfigured() {
+    void brokenConsumerRecordRethrowsWhenErrorOutputNotConnected() {
+        // A SourceOutput that does not support side outputs (the interface default throws).
+        final SourceOutput<String> noSideOutput =
+                new SourceOutput<String>() {
+                    @Override
+                    public void collect(String record) {}
+
+                    @Override
+                    public void collect(String record, long timestamp) {}
+
+                    @Override
+                    public void emitWatermark(Watermark watermark) {}
+
+                    @Override
+                    public void markIdle() {}
+
+                    @Override
+                    public void markActive() {}
+                };
         final KafkaRecordEmitter<String> emitter = new KafkaRecordEmitter<>(SCHEMA);
         final KafkaPartitionSplitState state =
                 new KafkaPartitionSplitState(
                         new KafkaPartitionSplit(new TopicPartition("topic", 0), 0L));
 
-        assertThatThrownBy(() -> emitter.emitRecord(record(0L, "bad"), new RecordingSourceOutput(), state))
-                .isInstanceOf(java.io.IOException.class);
+        assertThatThrownBy(() -> emitter.emitRecord(record(0L, "bad"), noSideOutput, state))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Failed to deserialize");
     }
 
     private static ConsumerRecord<byte[], byte[]> record(long offset, String value) {
