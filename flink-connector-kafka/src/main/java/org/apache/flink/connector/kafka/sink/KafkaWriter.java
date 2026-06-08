@@ -21,6 +21,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.api.common.operators.ProcessingTimeService;
 import org.apache.flink.api.common.serialization.SerializationSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.sink2.WriterInitContext;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.MetricUtil;
@@ -29,9 +30,11 @@ import org.apache.flink.connector.kafka.sink.internal.KafkaCommitter;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.connectors.kafka.internals.metrics.KafkaMetricMutableWrapper;
+import org.apache.flink.util.ErrorOutputTag;
 import org.apache.flink.util.FlinkRuntimeException;
-import org.apache.flink.util.OutputTag;
+import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -82,7 +85,10 @@ class KafkaWriter<IN>
     private volatile Exception asyncProducerException;
     private final Map<String, KafkaMetricMutableWrapper> previouslyCreatedMetrics = new HashMap<>();
     private final SinkWriterMetricGroup metricGroup;
-    @Nullable private OutputTag<IN> serializationErrorTag;
+    private static final ErrorOutputTag<?> SERIALIZATION_ERRORS =
+            new ErrorOutputTag<>(
+                    DataStreamSink.ERROR_SIDE_OUTPUT_ID, TypeInformation.of(Object.class));
+
     private final boolean disabledMetrics;
     // num records actually sent and acked by kafka; not volatile to prevent performance
     // degradation
@@ -168,11 +174,6 @@ class KafkaWriter<IN>
         }
     }
 
-    /** Routes elements that fail serialization into the given side output instead of failing. */
-    public void setSerializationErrorTag(@Nullable OutputTag<IN> serializationErrorTag) {
-        this.serializationErrorTag = serializationErrorTag;
-    }
-
     @Override
     public void write(@Nullable IN element, Context context) throws IOException {
         checkAsyncException();
@@ -180,20 +181,39 @@ class KafkaWriter<IN>
         try {
             record = recordSerializer.serialize(element, kafkaSinkContext, context.timestamp());
         } catch (Exception e) {
-            if (serializationErrorTag == null) {
-                throw e instanceof IOException
-                        ? (IOException) e
-                        : new IOException("Failed to serialize record.", e);
-            }
-            // Route the element that could not be turned into a ProducerRecord to the DLQ side
-            // output; the error metric is incremented by the runtime for an ErrorOutputTag.
-            context.output(serializationErrorTag, element);
+            forwardToErrorOutputOrThrow(
+                    element,
+                    context,
+                    () -> {
+                        throw e instanceof IOException
+                                ? (IOException) e
+                                : new IOException("Failed to serialize record.", e);
+                    });
             return;
         }
         if (record != null) {
             currentProducer.send(record, deliveryCallback);
             numRecordsOutCounter.inc();
         }
+    }
+
+    /**
+     * Forwards an element that failed serialization to the blessed error side output ({@link
+     * DataStreamSink#getErrorSideOutput()}), or runs {@code fallback} when it is not connected.
+     */
+    private void forwardToErrorOutputOrThrow(
+            @Nullable IN element, Context context, ThrowingRunnable<IOException> fallback)
+            throws IOException {
+        try {
+            context.output(serializationErrorTag(), element);
+        } catch (IllegalStateException | UnsupportedOperationException sideOutputUnavailable) {
+            fallback.run();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> ErrorOutputTag<T> serializationErrorTag() {
+        return (ErrorOutputTag<T>) SERIALIZATION_ERRORS;
     }
 
     @Override
