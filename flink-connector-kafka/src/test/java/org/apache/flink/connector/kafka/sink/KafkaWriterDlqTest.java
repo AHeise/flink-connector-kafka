@@ -18,11 +18,10 @@
 
 package org.apache.flink.connector.kafka.sink;
 
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.base.sink.writer.TestSinkInitContext;
-import org.apache.flink.util.ErrorOutputTag;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -30,18 +29,19 @@ import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 
-import static org.apache.flink.api.common.typeinfo.Types.STRING;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Tests that {@link KafkaWriter} routes records that fail serialization to a DLQ side output. */
+/**
+ * Tests that {@link KafkaWriter} forwards records that fail serialization to the blessed sink error
+ * side output ({@link DataStreamSink#getErrorSideOutput()}), or rethrows when it is not connected.
+ */
 class KafkaWriterDlqTest {
-
-    private static final OutputTag<String> DLQ = new ErrorOutputTag<>("sink-dlq", STRING);
 
     /** Serializes UTF-8 strings but fails on {@code "bad"}; returns null otherwise (skip send). */
     private static final KafkaRecordSerializationSchema<String> SCHEMA =
@@ -57,39 +57,37 @@ class KafkaWriterDlqTest {
             };
 
     @Test
-    void builderWiresSerializationErrorTagToSink() {
-        final KafkaSink<String> sink =
-                KafkaSink.<String>builder()
-                        .setBootstrapServers("localhost:9092")
-                        .setRecordSerializer(
-                                KafkaRecordSerializationSchema.builder()
-                                        .setTopic("topic")
-                                        .setValueSerializationSchema(new SimpleStringSchema())
-                                        .build())
-                        .setSerializationErrorTag(DLQ)
-                        .build();
-        assertThat(sink.getSerializationErrorTag()).isEqualTo(DLQ);
-    }
-
-    @Test
-    void brokenProducerRecordIsRoutedToDlq() throws Exception {
+    void brokenProducerRecordIsForwardedToBlessedTag() throws Exception {
         final KafkaWriter<String> writer = createWriter();
-        writer.setSerializationErrorTag(DLQ);
         final RecordingContext context = new RecordingContext();
 
-        writer.write("ok", context); // serialize returns null -> skipped, no DLQ, no producer
-        writer.write("bad", context); // serialize throws -> DLQ
+        writer.write("ok", context); // serialize returns null -> skipped, no producer touched
+        writer.write("bad", context); // serialize throws -> forwarded to the blessed error tag
 
         assertThat(context.sideValues).containsExactly("bad");
-        assertThat(context.sideTag).isEqualTo(DLQ);
+        assertThat(context.sideTag.getId()).isEqualTo(DataStreamSink.ERROR_SIDE_OUTPUT_ID);
     }
 
     @Test
-    void brokenProducerRecordFailsWhenNoDlqConfigured() throws Exception {
+    void brokenProducerRecordRethrowsWhenErrorOutputNotConnected() throws Exception {
         final KafkaWriter<String> writer = createWriter();
-        final RecordingContext context = new RecordingContext();
+        // A context whose output(...) is the interface default, which throws (not connected).
+        final SinkWriter.Context noSideOutput =
+                new SinkWriter.Context() {
+                    @Override
+                    public long currentWatermark() {
+                        return 0L;
+                    }
 
-        assertThatThrownBy(() -> writer.write("bad", context)).isInstanceOf(Exception.class);
+                    @Override
+                    public Long timestamp() {
+                        return null;
+                    }
+                };
+
+        assertThatThrownBy(() -> writer.write("bad", noSideOutput))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Failed to serialize");
     }
 
     private static KafkaWriter<String> createWriter() {
