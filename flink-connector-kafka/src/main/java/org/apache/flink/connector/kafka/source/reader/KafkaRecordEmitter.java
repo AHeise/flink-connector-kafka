@@ -21,11 +21,9 @@ package org.apache.flink.connector.kafka.source.reader;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.connector.source.SourceOutput;
 import org.apache.flink.connector.base.source.reader.RecordEmitter;
-import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 
@@ -55,29 +53,9 @@ public class KafkaRecordEmitter<T>
             deserializationSchema.deserialize(consumerRecord, sourceOutputWrapper);
             splitState.setCurrentOffset(consumerRecord.offset() + 1);
         } catch (Exception e) {
-            forwardToErrorOutputOrThrow(
-                    consumerRecord,
-                    output,
-                    () -> {
-                        throw new IOException("Failed to deserialize consumer record due to", e);
-                    });
-            splitState.setCurrentOffset(consumerRecord.offset() + 1);
-        }
-    }
-
-    /**
-     * Forwards a record that failed deserialization to {@link KafkaSource#DESERIALIZATION_ERRORS},
-     * or runs {@code fallback} (the connector's failure) when that side output is not connected.
-     */
-    private void forwardToErrorOutputOrThrow(
-            ConsumerRecord<byte[], byte[]> record,
-            SourceOutput<T> output,
-            ThrowingRunnable<IOException> fallback)
-            throws IOException {
-        try {
-            output.collect(KafkaSource.DESERIALIZATION_ERRORS, record, record.timestamp());
-        } catch (IllegalStateException | UnsupportedOperationException sideOutputUnavailable) {
-            fallback.run();
+            // SourceReaderBase routes the record + this failure to the dead-letter side output if
+            // one is connected; otherwise it rethrows.
+            throw new IOException("Failed to deserialize consumer record due to", e);
         }
     }
 

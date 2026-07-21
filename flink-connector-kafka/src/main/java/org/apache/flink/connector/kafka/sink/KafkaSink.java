@@ -24,6 +24,8 @@ import org.apache.flink.api.connector.sink2.Committer;
 import org.apache.flink.api.connector.sink2.CommitterInitContext;
 import org.apache.flink.api.connector.sink2.WriterInitContext;
 import org.apache.flink.api.dag.Transformation;
+import org.apache.flink.api.connector.SupportsDeadLetterOutput;
+import org.apache.flink.api.connector.SupportsSideOutput;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.lineage.KafkaDatasetFacet;
 import org.apache.flink.connector.kafka.lineage.KafkaDatasetFacetProvider;
@@ -37,6 +39,10 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessageTypeInfo;
 import org.apache.flink.streaming.api.connector.sink2.SupportsPostCommitTopology;
+import org.apache.flink.streaming.api.datastream.DataStreamSink;
+import org.apache.flink.util.DeadLetter;
+import org.apache.flink.util.ErrorOutputTag;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.lineage.LineageVertex;
 import org.apache.flink.streaming.api.lineage.LineageVertexProvider;
@@ -77,6 +83,8 @@ import java.util.Properties;
 public class KafkaSink<IN>
         implements LineageVertexProvider,
                 TwoPhaseCommittingStatefulSink<IN, KafkaWriterState, KafkaCommittable>,
+                SupportsDeadLetterOutput,
+                SupportsSideOutput,
                 SupportsPostCommitTopology<KafkaCommittable> {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaSink.class);
     private final DeliveryGuarantee deliveryGuarantee;
@@ -164,6 +172,14 @@ public class KafkaSink<IN>
         }
         writer.initialize();
         return writer;
+    }
+
+    @Override
+    public Collection<OutputTag<?>> getSideOutputTags() {
+        final OutputTag<?> serializationErrors =
+                new ErrorOutputTag<>(
+                        DataStreamSink.ERROR_SIDE_OUTPUT_ID, DeadLetter.genericTypeInfo());
+        return Collections.singletonList(serializationErrors);
     }
 
     @Internal

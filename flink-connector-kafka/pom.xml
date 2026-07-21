@@ -339,6 +339,7 @@ under the License.
 					<testIncludes>
 						<testInclude>**/KafkaRecordEmitterDlqTest.java</testInclude>
 						<testInclude>**/KafkaWriterDlqTest.java</testInclude>
+						<testInclude>**/KafkaSideOutputTagsTest.java</testInclude>
 						<testInclude>**/KafkaAssertjConfiguration.java</testInclude>
 					</testIncludes>
 				</configuration>

@@ -22,8 +22,11 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
+import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.source.Boundedness;
+import org.apache.flink.api.connector.SupportsDeadLetterOutput;
+import org.apache.flink.api.connector.SupportsSideOutput;
 import org.apache.flink.api.connector.source.Source;
 import org.apache.flink.api.connector.source.SourceReader;
 import org.apache.flink.api.connector.source.SourceReaderContext;
@@ -55,8 +58,9 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.streaming.api.lineage.LineageVertexProvider;
 import org.apache.flink.streaming.api.lineage.SourceLineageVertex;
-import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.util.DeadLetter;
 import org.apache.flink.util.ErrorOutputTag;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.apache.flink.util.function.SerializableSupplier;
 
@@ -101,6 +105,8 @@ import java.util.function.Supplier;
 public class KafkaSource<OUT>
         implements LineageVertexProvider,
                 Source<OUT, KafkaPartitionSplit, KafkaSourceEnumState>,
+                SupportsDeadLetterOutput,
+                SupportsSideOutput,
                 ResultTypeQueryable<OUT> {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaSource.class);
     private static final long serialVersionUID = -8755372893283732098L;
@@ -116,15 +122,6 @@ public class KafkaSource<OUT>
     private final Properties props;
     // Client rackId callback
     private final SerializableSupplier<String> rackIdSupplier;
-
-    /**
-     * Blessed side output for records that fail deserialization; consume via {@code
-     * source.getSideOutput(KafkaSource.DESERIALIZATION_ERRORS)} or such a record fails the source.
-     */
-    public static final ErrorOutputTag<ConsumerRecord<byte[], byte[]>> DESERIALIZATION_ERRORS =
-            new ErrorOutputTag<>(
-                    "deserialization-errors",
-                    TypeInformation.of(new TypeHint<ConsumerRecord<byte[], byte[]>>() {}));
 
     KafkaSource(
             KafkaSubscriber subscriber,
@@ -250,6 +247,17 @@ public class KafkaSource<OUT>
     @Override
     public TypeInformation<OUT> getProducedType() {
         return deserializationSchema.getProducedType();
+    }
+
+    @Override
+    public Collection<OutputTag<?>> getSideOutputTags() {
+        final OutputTag<?> deserializationErrors =
+                new ErrorOutputTag<>(
+                        DeadLetter.SOURCE_TAG_ID,
+                        DeadLetter.typeInfo(
+                                TypeInformation.of(
+                                        new TypeHint<ConsumerRecord<byte[], byte[]>>() {})));
+        return Collections.singletonList(deserializationErrors);
     }
 
     // ----------- private helper methods ---------------

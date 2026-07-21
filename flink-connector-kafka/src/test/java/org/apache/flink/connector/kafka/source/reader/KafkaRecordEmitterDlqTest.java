@@ -22,7 +22,6 @@ import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.connector.source.SourceOutput;
-import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplit;
 import org.apache.flink.connector.kafka.source.split.KafkaPartitionSplitState;
@@ -42,8 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Tests that {@link KafkaRecordEmitter} forwards undeserializable records to the blessed {@link
- * KafkaSource#DESERIALIZATION_ERRORS} side output, or rethrows when it is not connected.
+ * Tests {@link KafkaRecordEmitter}: good records reach the main output; a record that fails
+ * deserialization throws (SourceReaderBase routes it to a dead-letter output if one is connected).
  */
 class KafkaRecordEmitterDlqTest {
 
@@ -67,7 +66,7 @@ class KafkaRecordEmitterDlqTest {
             };
 
     @Test
-    void brokenConsumerRecordIsForwardedToBlessedTagAndOffsetAdvances() throws Exception {
+    void goodRecordReachesMainOutputAndAdvancesOffset() throws Exception {
         final KafkaRecordEmitter<String> emitter = new KafkaRecordEmitter<>(SCHEMA);
         final KafkaPartitionSplitState state =
                 new KafkaPartitionSplitState(
@@ -75,43 +74,20 @@ class KafkaRecordEmitterDlqTest {
         final RecordingSourceOutput output = new RecordingSourceOutput();
 
         emitter.emitRecord(record(0L, "good"), output, state);
-        emitter.emitRecord(record(1L, "bad"), output, state);
 
         assertThat(output.mainValues).containsExactly("good");
-        assertThat(output.sideTag).isEqualTo(KafkaSource.DESERIALIZATION_ERRORS);
-        assertThat(output.sideValues)
-                .singleElement()
-                .extracting(r -> new String(r.value(), StandardCharsets.UTF_8))
-                .isEqualTo("bad");
-        assertThat(state.getCurrentOffset()).isEqualTo(2L);
+        assertThat(state.getCurrentOffset()).isEqualTo(1L);
     }
 
     @Test
-    void brokenConsumerRecordRethrowsWhenErrorOutputNotConnected() {
-        // A SourceOutput that does not support side outputs (the interface default throws).
-        final SourceOutput<String> noSideOutput =
-                new SourceOutput<String>() {
-                    @Override
-                    public void collect(String record) {}
-
-                    @Override
-                    public void collect(String record, long timestamp) {}
-
-                    @Override
-                    public void emitWatermark(Watermark watermark) {}
-
-                    @Override
-                    public void markIdle() {}
-
-                    @Override
-                    public void markActive() {}
-                };
+    void brokenConsumerRecordThrows() {
         final KafkaRecordEmitter<String> emitter = new KafkaRecordEmitter<>(SCHEMA);
         final KafkaPartitionSplitState state =
                 new KafkaPartitionSplitState(
                         new KafkaPartitionSplit(new TopicPartition("topic", 0), 0L));
 
-        assertThatThrownBy(() -> emitter.emitRecord(record(0L, "bad"), noSideOutput, state))
+        assertThatThrownBy(
+                        () -> emitter.emitRecord(record(0L, "bad"), new RecordingSourceOutput(), state))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("Failed to deserialize");
     }
@@ -123,8 +99,6 @@ class KafkaRecordEmitterDlqTest {
 
     private static final class RecordingSourceOutput implements SourceOutput<String> {
         private final List<String> mainValues = new ArrayList<>();
-        private final List<ConsumerRecord<byte[], byte[]>> sideValues = new ArrayList<>();
-        private OutputTag<?> sideTag;
 
         @Override
         public void collect(String record) {
@@ -134,19 +108,6 @@ class KafkaRecordEmitterDlqTest {
         @Override
         public void collect(String record, long timestamp) {
             mainValues.add(record);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <X> void collect(OutputTag<X> outputTag, X value) {
-            collect(outputTag, value, 0L);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <X> void collect(OutputTag<X> outputTag, X value, long timestamp) {
-            sideTag = outputTag;
-            sideValues.add((ConsumerRecord<byte[], byte[]>) value);
         }
 
         @Override

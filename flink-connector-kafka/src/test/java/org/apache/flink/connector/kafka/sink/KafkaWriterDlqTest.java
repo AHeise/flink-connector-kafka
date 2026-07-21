@@ -22,6 +22,7 @@ import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.base.sink.writer.TestSinkInitContext;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
+import org.apache.flink.util.DeadLetter;
 import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -64,8 +65,15 @@ class KafkaWriterDlqTest {
         writer.write("ok", context); // serialize returns null -> skipped, no producer touched
         writer.write("bad", context); // serialize throws -> forwarded to the blessed error tag
 
-        assertThat(context.sideValues).containsExactly("bad");
         assertThat(context.sideTag.getId()).isEqualTo(DataStreamSink.ERROR_SIDE_OUTPUT_ID);
+        assertThat(context.sideValues)
+                .singleElement()
+                .isInstanceOfSatisfying(
+                        DeadLetter.class,
+                        dl -> {
+                            assertThat(dl.getRecord()).isEqualTo("bad");
+                            assertThat(dl.getError()).isNotNull();
+                        });
     }
 
     @Test

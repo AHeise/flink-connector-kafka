@@ -21,7 +21,6 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.api.common.operators.ProcessingTimeService;
 import org.apache.flink.api.common.serialization.SerializationSchema;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.connector.sink2.WriterInitContext;
 import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.MetricUtil;
@@ -32,6 +31,7 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.connectors.kafka.internals.metrics.KafkaMetricMutableWrapper;
+import org.apache.flink.util.DeadLetter;
 import org.apache.flink.util.ErrorOutputTag;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.function.ThrowingRunnable;
@@ -86,8 +86,7 @@ class KafkaWriter<IN>
     private final Map<String, KafkaMetricMutableWrapper> previouslyCreatedMetrics = new HashMap<>();
     private final SinkWriterMetricGroup metricGroup;
     private static final ErrorOutputTag<?> SERIALIZATION_ERRORS =
-            new ErrorOutputTag<>(
-                    DataStreamSink.ERROR_SIDE_OUTPUT_ID, TypeInformation.of(Object.class));
+            new ErrorOutputTag<>(DataStreamSink.ERROR_SIDE_OUTPUT_ID, DeadLetter.genericTypeInfo());
 
     private final boolean disabledMetrics;
     // num records actually sent and acked by kafka; not volatile to prevent performance
@@ -182,7 +181,7 @@ class KafkaWriter<IN>
             record = recordSerializer.serialize(element, kafkaSinkContext, context.timestamp());
         } catch (Exception e) {
             forwardToErrorOutputOrThrow(
-                    element,
+                    DeadLetter.of(element, e),
                     context,
                     () -> {
                         throw e instanceof IOException
@@ -198,22 +197,22 @@ class KafkaWriter<IN>
     }
 
     /**
-     * Forwards an element that failed serialization to the blessed error side output ({@link
-     * DataStreamSink#getErrorSideOutput()}), or runs {@code fallback} when it is not connected.
+     * Forwards an element that failed serialization (as a {@link DeadLetter}) to the blessed error
+     * side output ({@link DataStreamSink#getErrorSideOutput()}), or runs {@code fallback}.
      */
     private void forwardToErrorOutputOrThrow(
-            @Nullable IN element, Context context, ThrowingRunnable<IOException> fallback)
+            DeadLetter<IN> deadLetter, Context context, ThrowingRunnable<IOException> fallback)
             throws IOException {
         try {
-            context.output(serializationErrorTag(), element);
+            context.output(serializationErrorTag(), deadLetter);
         } catch (IllegalStateException | UnsupportedOperationException sideOutputUnavailable) {
             fallback.run();
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> ErrorOutputTag<T> serializationErrorTag() {
-        return (ErrorOutputTag<T>) SERIALIZATION_ERRORS;
+    private static <T> ErrorOutputTag<DeadLetter<T>> serializationErrorTag() {
+        return (ErrorOutputTag<DeadLetter<T>>) SERIALIZATION_ERRORS;
     }
 
     @Override
